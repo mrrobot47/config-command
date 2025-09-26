@@ -100,4 +100,60 @@ class Config_Command extends EE_Command {
 
 		$this->fs->dumpFile( $config_file_path, Spyc::YAMLDump( $config, false, false, true ) );
 	}
+
+	/**
+	 * Lists the config values.
+	 *
+	 * [--format=<format>]
+	 * : Render output in a particular format.
+	 * ---
+	 * default: table
+	 * options:
+	 *   - table
+	 *   - csv
+	 *   - yaml
+	 *   - json
+	 *   - count
+	 *   - text
+	 * ---
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     # List all config values
+	 *     $ ee config list
+	 *
+	 *     # List all config values in JSON
+	 *     $ ee config list --format=json
+	 *
+	 * @subcommand list
+	 */
+	public function _list( $args, $assoc_args ) {
+		$config_file_path = getenv( 'EE_CONFIG_PATH' ) ? getenv( 'EE_CONFIG_PATH' ) : EE_ROOT_DIR . '/config/config.yml';
+		$config           = Spyc::YAMLLoad( $config_file_path );
+		$format           = \EE\Utils\get_flag_value( $assoc_args, 'format' );
+
+		if ( empty( $config ) ) {
+			\EE::error( 'No config values found!' );
+		}
+
+		if ( 'text' === $format ) {
+			foreach ( $config as $key => $value ) {
+				\EE::log( $key . ': ' . $value );
+			}
+		} else {
+			$result = array_map(
+				function ( $key, $value ) {
+					return [
+						'key'   => $key,
+						'value' => $value,
+					];
+				},
+				array_keys( $config ),
+				$config
+			);
+
+			$formatter = new \EE\Formatter( $assoc_args, [ 'key', 'value' ] );
+			$formatter->display_items( $result );
+		}
+	}
 }

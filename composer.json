@@ -22,7 +22,8 @@
             "config",
             "config set",
             "config get",
-            "config unset"
+            "config unset",
+            "config list"
         ]
     }
 }
