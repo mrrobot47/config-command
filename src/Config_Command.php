@@ -72,4 +72,32 @@ class Config_Command extends EE_Command {
 
 		$this->fs->dumpFile( $config_file_path, Spyc::YAMLDump( $config, false, false, true ) );
 	}
+
+	/**
+	 * Unset a config value
+	 *
+	 * ## OPTIONS
+	 *
+	 * <key>
+	 * : Key of config to unset
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     # Remove value from config
+	 *     $ ee config unset cloudflare-api-key
+	 *
+	 */
+	public function unset( $args, $assoc_args ) {
+		$config_file_path = getenv( 'EE_CONFIG_PATH' ) ? getenv( 'EE_CONFIG_PATH' ) : EE_ROOT_DIR . '/config/config.yml';
+		$config           = Spyc::YAMLLoad( $config_file_path );
+		$key              = $args[0];
+
+		if ( ! isset( $config[ $key ] ) ) {
+			EE::error( "No config value with key '$key' set" );
+		}
+
+		unset( $config[ $key ] );
+
+		$this->fs->dumpFile( $config_file_path, Spyc::YAMLDump( $config, false, false, true ) );
+	}
 }

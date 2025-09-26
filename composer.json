@@ -21,7 +21,8 @@
         "commands": [
             "config",
             "config set",
-            "config get"
+            "config get",
+            "config unset"
         ]
     }
 }
