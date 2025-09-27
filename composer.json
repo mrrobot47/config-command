@@ -19,7 +19,11 @@
         },
         "bundled": true,
         "commands": [
-            "config"
+            "config",
+            "config set",
+            "config get",
+            "config unset",
+            "config list"
         ]
     }
 }
