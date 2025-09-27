@@ -113,7 +113,6 @@ class Config_Command extends EE_Command {
 	 *   - csv
 	 *   - yaml
 	 *   - json
-	 *   - count
 	 *   - text
 	 * ---
 	 *
