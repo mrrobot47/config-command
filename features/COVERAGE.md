@@ -1,6 +1,6 @@
 # config-command Behat coverage
 
-Suite for `ee config` (`src/Config_Command.php`). Every scenario except those in `config-global.feature` points `EE_CONFIG_PATH` at a throwaway file under `sys_get_temp_dir()`, so `/opt/easyengine/config/config.yml` is never written. The context snapshots the real config before each scenario, restores it byte-for-byte (content and mode) afterwards, and fails any scenario not tagged `@destructive` that changed it. No sites, containers, `/etc/hosts` entries, LE certificates or remote backups are involved; the config commands don't even need Docker.
+Suite for `ee config` (`src/Config_Command.php`). Every scenario except those in `config-global.feature` points `EE_CONFIG_PATH` at a throwaway file under `sys_get_temp_dir()`, so `/opt/easyengine/config/config.yml` is never written. Before each scenario the context captures the real config (bytes, mode, owner, symlink target) and also writes it to `/var/tmp/bh-config-command-real-config.backup` (0600). Afterwards it restores the file atomically if anything changed, verifies the result, deletes the backup, and fails any scenario not tagged `@destructive` that changed it (the message names the changed keys only, never values). A shutdown function restores it on Ctrl-C (Behat exits without AfterScenario), SIGTERM/SIGHUP and PHP fatals; after a `kill -9` the next run's `@BeforeSuite` restores it from the backup when it carries this suite's `bh-config-command-key`, and otherwise stops and asks for a manual check. A lock file prevents two runs from overlapping. The context also pins `PAGER=cat` and, unless `EE_PHP_ARGS` is set, PHP's error settings (notices to STDERR, no deprecations), so results don't depend on the host php.ini. No sites, containers, `/etc/hosts` entries, LE certificates or remote backups are involved; the config commands don't even need Docker.
 
 ## Inventory
 
@@ -9,19 +9,21 @@ Suite for `ee config` (`src/Config_Command.php`). Every scenario except those in
 | `ee config` (no subcommand): usage of all subcommands, exit 0 | core `CompositeCommand::show_usage()` | config.feature: "Running ee config without a subcommand…" |
 | `ee help config`, `ee help config <sub>` (synopsis, list formats) | docblocks | config.feature: "ee help config lists…", outline "ee help config <subcommand>…", "…documents every supported format" |
 | Unknown subcommand (with and without suggestion) | core `Runner::find_command_to_run()` | config.feature: two "unknown config subcommand" scenarios |
-| No Docker requirement check for `config` | core `Runner::init_ee()` | config.feature: "config commands skip the Docker requirement check" (docker/docker-compose shims that always fail) |
-| `get <config-key>`: string, value with colon, quoted number, integer, boolean, empty value, bootstrap default | `get()` | config-get.feature: "Get an existing string value" … "Get the defaults that the bootstrap guarantees" |
+| No Docker requirement check for `config` | core `Runner::init_ee()` | config.feature: "config commands skip the Docker requirement check" (docker/docker-compose shims that always fail and record calls; asserts they were never called) |
+| `get <config-key>`: string, value with colon, quoted number, integer, boolean, empty value, bootstrap default | `get()` | config-get.feature: "Get an existing string value" … "Get ee_installer_version" |
 | `get`: read-only (file byte-identical) | `get()` | config-get.feature: "Get does not modify the config file" |
 | `get`: missing key error, case sensitivity, dotted keys are literal | `get()` isset check | config-get.feature: "Getting a missing key fails", "Keys are case-sensitive", "Dotted keys are literal…" |
 | `get`: no arg (usage), two args, unknown flag | core `Subcommand::validate_args()` | config-get.feature: "Get without a key…", "Get with two keys…", "Get rejects unknown flags" |
 | `get` on a config path that doesn't exist yet | `get()` + bootstrap | config-get.feature: "Get works with a freshly created config file" |
 | `get` of a null value | `get()` isset | config-get.feature `@known-bug` CFG-1 |
 | `get` of a nested map | `get()` → `EE::log(array)` | config-get.feature `@known-bug` CFG-2 |
-| `get --quiet` | `get()` uses `EE::log` | config-get.feature `@known-bug` CFG-5 |
+| `get --quiet` still prints the value | `get()` uses `EE::log`; quiet is ignored (CFG-5) | config-get.feature: "Get still prints the value with --quiet" (guards the latent CFG-5 problem) |
 | `get` copies the value into ee.log | `EE::log` → file logger | config-get.feature `@known-bug` CFG-8 |
 | `set <key> <value>`: new key (exact file content, no output), read back, overwrite keeps position, idempotent | `set()` | config-set.feature: first four scenarios |
 | `set`: numeric stored as quoted string, empty value, dotted key literal, replacing a nested map, multi-line value, leading/trailing spaces | `set()` + Spyc dump | config-set.feature: "Numeric values…", "An empty value…", "Dotted keys…", "Setting a key that holds a nested map…", "A multi-line value…", "A value with leading and trailing spaces…" |
 | `set`: 24 YAML-special values round-trip (true/false/yes/no/on/null/~/0/0123/1e3/1.50/`a: b`/`a #b`/`[1,2]`/`{a: b}`/-dash/spaces/email/URL with `#`/unicode/`%p`/`&`/`*`/`!`) | Spyc quoting | config-set.feature outline "Special value <value> round-trips unchanged" |
+| `set`/`get`/`unset` of keys that need YAML quoting (space, `: `, `#`, `@`) | Spyc key quoting | config-set.feature outline "Key <key> that needs YAML quoting round-trips" |
+| `set` of a key containing a newline | no key validation | config-set.feature `@known-bug` CFG-10 |
 | `set`: missing value / no args (usage, file untouched), unquoted spaces, flag-looking value, unknown flag | core validation | config-set.feature: "Set without a value…", "Set without arguments…", "An unquoted value with spaces…", "A value that looks like a flag…", "Set rejects unknown flags" |
 | `set` creates a missing file and directories | `set()` + bootstrap + Symfony `dumpFile()` | config-set.feature: "Set creates a missing config file…" |
 | `set` keeps the file mode | Symfony `dumpFile()` | config-set.feature: "Set keeps the file mode" |
@@ -44,38 +46,44 @@ Suite for `ee config` (`src/Config_Command.php`). Every scenario except those in
 | `list --format=json --quiet` | Formatter echoes directly | config-list.feature: "Machine-readable formats still print with --quiet" |
 | `list --format=text` with nested map | `_list()` string concat | config-list.feature `@known-bug` CFG-2 |
 | `list` shows null keys that get can't read | isset vs list | config-list.feature `@known-bug` CFG-1 |
-| `list` (table) with `--quiet` | `EE::line` goes through the logger | config-list.feature `@known-bug` CFG-5 |
+| `list` (table/text) with `--quiet` | `EE::line`/`EE::log` go through the logger; quiet is ignored (CFG-5) | config-list.feature: "Human-readable formats still print with --quiet" |
+| `list --format=text` copies values into ee.log | `EE::log` → file logger | config-list.feature `@known-bug` CFG-8 |
 | Bootstrap: missing file/dirs created with `locale`/`ee_installer_version`, empty file, missing defaults appended, file untouched when defaults exist | core `Runner::ensure_present_in_config()` | config-path.feature: first four scenarios |
 | `EE_CONFIG_PATH` switching per invocation | all subcommands | config-path.feature: "EE_CONFIG_PATH switches files per invocation" |
-| Config keys that are global runtime parameters: hand-written `disabled_commands` list, `quiet: true` | core Configurator/Runner | config-path.feature: "A hand-written disabled_commands list…", "quiet in the config file silences…" |
-| `set quiet false`, `set disabled_commands …` | set writes strings | config-path.feature `@known-bug` CFG-4 (2 scenarios) |
+| Config keys that are global runtime parameters: hand-written `disabled_commands` list, `quiet` | core Configurator/Runner | config-path.feature: "A hand-written disabled_commands list…", "quiet in the config file does not hide…", "Setting quiet to false stores a string…" |
+| `set disabled_commands …` | set writes strings | config-path.feature `@known-bug` CFG-4 |
 | Default path (no `EE_CONFIG_PATH`, empty `EE_CONFIG_PATH`): list, set/get/unset, mode kept | path fallback | config-global.feature (`@destructive`, 4 scenarios, restored by the context) |
 | Config not readable/writable errors | core `ensure_present_in_config()` | not covered: the suite runs as root, which bypasses file permissions; core code, not this package |
 | `~/easyengine` config root on macOS | core `init-ee.php` | not covered: Linux-only CI |
+| Global runtime flags accepted by config subcommands (`--le-mail=…`, `--debug`), project `ee.yml`/`ee.local.yml` merged from the working directory | core Configurator | not covered: core behaviour, not specific to this package |
 
 ## Counts
 
-7 features, 127 scenarios (outline examples expanded): `@known-bug` 20, `@destructive` 4, `@le` 0, `@remote` 0. 103 scenarios run with neither tag.
+7 features, 134 scenarios (outline examples expanded): `@known-bug` 19, `@destructive` 4, `@le` 0, `@remote` 0. 111 scenarios run with neither tag.
 
-Coverage estimate: about 95% of the package's reachable behaviour (every subcommand, argument, format and error path in `Config_Command.php`, plus the core bootstrap/validation behaviour they depend on). The only uncovered package branch is `list`'s "No config values found!", which the bootstrap makes unreachable.
+Coverage estimate: about 93% of the package's reachable behaviour (every subcommand, argument, format and error path in `Config_Command.php`, plus the core bootstrap/validation behaviour they depend on). The only uncovered package branch is `list`'s "No config values found!", which the bootstrap makes unreachable; the gaps are the core behaviours listed as not covered above. The mode check in `config-global.feature` can't catch a mode regression when the real file is 0644 (the default for a new file); the temp-file mode scenarios (0600, 0640) do.
 
-Estimated runtime: about 215 `bin/ee` invocations with no Docker work, roughly 1.5 to 3 minutes.
+Estimated runtime: about 235 `bin/ee` invocations with no Docker work, roughly 2 to 3 minutes.
 
-## Known bugs exposed (proposed IDs, not yet in issues.md)
+## Known bugs exposed
 
-- CFG-1 (Low): `get` and `unset` use `isset()`, so a key whose value is null (`k: ~`, `k: null`) is "not set" although `list` shows it, and it can't be removed with `unset`. Fix: `array_key_exists()`.
-- CFG-2 (Low): non-scalar values: `get` prints `Array` (PHP "Array to string conversion"), `list --format=text` prints `key: Array`.
-- CFG-3 (Medium): `set`/`unset` rewrite the whole file through Spyc: comments are dropped, and hand-written unquoted `y`/`yes`/`on`/`off`/`no` in unrelated keys become `true`/`false`. The bootstrap writer also adds `---`, which `set` then removes.
-- CFG-4 (Medium): `set` always writes strings. `ee config set disabled_commands "<cmd>"` makes every later ee command fatal on PHP 8 (TypeError from `in_array()` in `Runner::is_command_disabled()`), including the `ee config unset` needed to repair it; on 7.4 it's a hidden warning and nothing is disabled. `ee config set quiet false` enables quiet mode because `'false'` is truthy.
-- CFG-5 (Low): `get` prints through `EE::log`, and `list` table/text through the logger, so `--quiet` (or `quiet` in the config) hides exactly the output that was asked for; json/csv/yaml still print.
-- CFG-6 (Low): the values `"quoted"` (loses its quotes) and `|` (becomes empty) don't round-trip through `set` then `get` (Spyc dumper).
-- CFG-7 (Low): `set`/`unset` replace a symlinked config file with a regular file (Symfony `dumpFile()` renames a temp file over the path), while the bootstrap writer writes through the link.
-- CFG-8 (Medium, security): secrets reach `/opt/easyengine/logs/ee.log`: `get` logs the value (`EE::log` also writes to the file logger at INFO), and core logs the full argv at DEBUG, so `ee config set cloudflare-api-key <key>` persists the key.
-- CFG-9 (Info): `ee help config get` says "Set a config value"; the group description says "Manges"; the README documents only `set`/`get`.
+All are in `/root/workspace/issues.md` ("config-command" section), each reproduced on PHP 7.4 and 8.5:
+
+- CFG-1 (Low): `get`/`unset` use `isset()`, so null-valued keys can't be read or removed.
+- CFG-2 (Low): nested values print `Array` in `get` and `list --format=text`.
+- CFG-3 (Medium): `set`/`unset` rewrite the whole file (comments dropped, `y`/`off` become `true`/`false`).
+- CFG-4 (Medium): `set` stores strings; `set disabled_commands X` makes every ee command fatal on PHP 8, including the `unset` needed to fix it.
+- CFG-5 (Low, core): `--quiet` and `quiet:` never take effect (the logger is set up before the config is read). No failing scenario: the suspected "quiet hides get/list output" doesn't happen today; the quiet scenarios guard against it once quiet is fixed.
+- CFG-6 (Low): `"quoted"` and `|` values change after `set` then `get`.
+- CFG-7 (Low): `set`/`unset` replace a symlinked config with a regular file.
+- CFG-8 (Medium, security): secrets reach ee.log (`get` and `list --format=text` log values; core logs argv, so `set cloudflare-api-key <key>` persists the key).
+- CFG-9 (Info): help text bugs ("Set a config value" on get, "Manges", incomplete README; the README part has no scenario).
+- CFG-10 (Low): a key containing a newline corrupts the config so every ee command dies.
 
 ## Notes
 
+- `@known-bug` scenarios name their ID in a comment above the tag.
 - Asserted as current behaviour, not tagged as bugs: `set`/`unset` print nothing on success (other ee commands print `Success:`); unsetting `locale`/`ee_installer_version` is undone by the next invocation. Seen in the code but not tested: `ee config set debug true` stores the string `'true'`, which the logger treats as a debug group name, so it doesn't enable debug output.
 - The CSV scenarios may also expose PHP 8.4+'s `fputcsv()` `$escape` deprecation if `display_errors` is on (it's off on this host's CLI).
-- New shared steps are in the "Shared steps" section of `bootstrap/FeatureContext.php`. The inherited "I run" step now expands `{…}` placeholders, runs the command without copying its output into ee.log, and refuses `sudo` while a temporary config is active, because sudo drops `EE_CONFIG_PATH`.
+- New shared steps are in the "Shared steps" section of `bootstrap/FeatureContext.php`. The inherited "I run" step now expands `{…}` placeholders (an undefined placeholder is an error, never a literal path), runs the command without copying its output into ee.log, and refuses `sudo`/`su`/`env -…` while a temporary config is active, because they can drop `EE_CONFIG_PATH`. The ee.log steps fail if nothing was appended, so they can't pass vacuously.
 - The site-command pattern of deleting every site after each feature is replaced by deleting only `bh-config-command-*` sites, and only when such a site directory exists, so this suite never calls `ee site` at all in practice.

@@ -123,10 +123,7 @@ Feature: ee config list
         {"key": "ee_installer_version", "value": "stable"}
       ]
       """
-    And STDOUT should not contain:
-      """
-      No config values found!
-      """
+    And STDERR should be empty
 
   Scenario: List shows booleans, integers, empty strings and nested maps with their JSON types
     Given a temporary ee config file with:
@@ -232,7 +229,7 @@ Feature: ee config list
     Then the exit code should be 0
     And STDOUT should be JSON listing the entries of the YAML file '{CONFIG_PATH}'
 
-  # CFG-2 (proposed): --format=text concatenates values, so nested maps print as "Array".
+  # CFG-2: --format=text concatenates values, so nested maps print as "Array".
   @known-bug
   Scenario: --format=text prints nested values readably
     Given a temporary ee config file with:
@@ -249,7 +246,7 @@ Feature: ee config list
       parent: Array
       """
 
-  # CFG-1 (proposed): null values are listed although get/unset claim the key is not set.
+  # CFG-1: null values are listed although get/unset claim the key is not set.
   @known-bug
   Scenario: Keys listed by list can be read with get
     Given a temporary ee config file with:
@@ -266,12 +263,37 @@ Feature: ee config list
     When I run 'bin/ee config get bh-null'
     Then the exit code should be 0
 
-  # CFG-5 (proposed): table and text output go through the logger, so --quiet swallows them while json/csv/yaml still print.
-  @known-bug
+  # --quiet is ignored today (CFG-5). Table and text output go through the logger, so fixing quiet must not swallow them.
   Scenario: Human-readable formats still print with --quiet
     When I run 'bin/ee config list --quiet'
     Then the exit code should be 0
+    And STDOUT should be a table with rows:
+      | key                  | value                        |
+      | locale               | en_US                        |
+      | ee_installer_version | stable                       |
+      | le-mail              | admin@bh-config-command.test |
+      | no-of-backups        | 3                            |
+    When I run 'bin/ee config list --format=text --quiet'
+    Then the exit code should be 0
     And STDOUT should contain:
       """
-      le-mail
+      le-mail: admin@bh-config-command.test
       """
+
+  # CFG-8: --format=text prints through EE::log, which also writes every value (secrets included) to ee.log.
+  @known-bug
+  Scenario: List --format=text does not copy values into ee.log
+    Given a temporary ee config file with:
+      """
+      locale: en_US
+      ee_installer_version: stable
+      cloudflare-api-key: bh-config-command-secret-{RUN_ID}
+      """
+    And I remember the size of the file '{EE_LOG}'
+    When I run 'bin/ee config list --format=text'
+    Then the exit code should be 0
+    And STDOUT should contain:
+      """
+      cloudflare-api-key: bh-config-command-secret-{RUN_ID}
+      """
+    And the text appended to the file '{EE_LOG}' should not contain 'bh-config-command-secret-{RUN_ID}'

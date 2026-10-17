@@ -132,7 +132,7 @@ Feature: ee config unset
       """
     And the YAML file '{CONFIG_PATH}' should have key 'locale' with value 'en_US'
 
-  # CFG-1 (proposed): unset uses isset(), so a key whose value is null can never be removed.
+  # CFG-1: unset uses isset(), so a key whose value is null can never be removed.
   @known-bug
   Scenario: Unset a key whose value is null
     Given a temporary ee config file with:
@@ -149,7 +149,7 @@ Feature: ee config unset
     Then the exit code should be 0
     And the YAML file '{CONFIG_PATH}' should not have key 'bh-null-word'
 
-  # CFG-3 (proposed): unset rewrites the whole file through Spyc; comments are dropped.
+  # CFG-3: unset rewrites the whole file through Spyc; comments are dropped.
   @known-bug
   Scenario: Unset keeps comments in the config file
     Given a temporary ee config file with:
@@ -167,7 +167,7 @@ Feature: ee config unset
       # Cloudflare token for DNS-01
       """
 
-  # CFG-7 (proposed): the symlink is replaced by a regular file.
+  # CFG-7: the symlink is replaced by a regular file.
   @known-bug
   Scenario: Unset writes through a symlinked config file
     Given the temporary ee config file is a symlink

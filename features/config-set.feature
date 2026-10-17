@@ -212,7 +212,41 @@ Feature: ee config set
     And the YAML file '{CONFIG_PATH}' should not have key 'bh-key'
     And the real ee config file should be unchanged
 
-  # CFG-6 (proposed): Spyc dumps these values unquoted, so they come back changed ("dq" loses quotes, | becomes empty).
+  Scenario Outline: Key <key> that needs YAML quoting round-trips
+    When I run 'bin/ee config set "<key>" bh-value'
+    Then the exit code should be 0
+    And the YAML file '{CONFIG_PATH}' should have key '<key>' with value 'bh-value'
+    When I run 'bin/ee config get "<key>"'
+    Then the exit code should be 0
+    And STDOUT should be:
+      """
+      bh-value
+      """
+    When I run 'bin/ee config unset "<key>"'
+    Then the exit code should be 0
+    And the YAML file '{CONFIG_PATH}' should not have key '<key>'
+
+    Examples:
+      | key        |
+      | bh key     |
+      | bh: key    |
+      | #bh-key    |
+      | bh#key     |
+      | @bh-key    |
+
+  # CFG-10: keys aren't validated; a newline in the key writes YAML that Spyc can't parse, so every later ee command dies.
+  @known-bug
+  Scenario: A key containing a newline is rejected and the config stays readable
+    When I run 'bin/ee config set "$(printf "bh-key\nlocale: fr_FR")" v'
+    Then the exit code should be 1
+    When I run 'bin/ee config get locale'
+    Then the exit code should be 0
+    And STDOUT should be:
+      """
+      en_US
+      """
+
+  # CFG-6: Spyc dumps these values unquoted, so they come back changed ("dq" loses quotes, | becomes empty).
   @known-bug
   Scenario Outline: Value <value> round-trips unchanged
     When I run 'bin/ee config set bh-special <shell>'
@@ -228,7 +262,7 @@ Feature: ee config set
       | '"quoted"'    | "quoted" |
       | '\|'          | \|       |
 
-  # CFG-3 (proposed): set rewrites the whole file through Spyc; comments are dropped.
+  # CFG-3: set rewrites the whole file through Spyc; comments are dropped.
   @known-bug
   Scenario: Set keeps comments in the config file
     Given a temporary ee config file with:
@@ -244,7 +278,7 @@ Feature: ee config set
       # Managed by bh-config-command
       """
 
-  # CFG-3 (proposed): unquoted YAML 1.1 booleans in other keys are rewritten as true/false.
+  # CFG-3: unquoted YAML 1.1 booleans in other keys are rewritten as true/false.
   @known-bug
   Scenario: Set does not change unrelated hand-written values
     Given a temporary ee config file with:
@@ -262,7 +296,7 @@ Feature: ee config set
       bh-switch: off
       """
 
-  # CFG-7 (proposed): Symfony dumpFile() renames a temp file over the path, replacing a symlinked config.
+  # CFG-7: Symfony dumpFile() renames a temp file over the path, replacing a symlinked config.
   @known-bug
   Scenario: Set writes through a symlinked config file
     Given the temporary ee config file is a symlink
@@ -271,7 +305,7 @@ Feature: ee config set
     And the temporary ee config file should be a symlink
     And the YAML file '{CONFIG_TARGET}' should have key 'le-mail' with value 'admin@bh-config-command.test'
 
-  # CFG-8 (proposed): the runner logs argv at debug level to ee.log, so secrets passed to `config set` are persisted there.
+  # CFG-8: the runner logs argv at debug level to ee.log, so secrets passed to `config set` are persisted there.
   @known-bug
   Scenario: Set does not copy the value into ee.log
     Given the environment variable 'BH_SECRET' is set to 'bh-config-command-secret-{RUN_ID}'

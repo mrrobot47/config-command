@@ -65,7 +65,7 @@ Feature: ee config get
     And STDOUT should be empty
     And STDERR should be empty
 
-  Scenario: Get the defaults that the bootstrap guarantees
+  Scenario: Get ee_installer_version
     When I run 'bin/ee config get ee_installer_version'
     Then the exit code should be 0
     And STDOUT should be:
@@ -154,14 +154,14 @@ Feature: ee config get
       """
     And the file '{CONFIG_PATH}' should exist
 
-  # CFG-1 (proposed): get uses isset(), so a key whose value is null is reported as not set.
+  # CFG-1: get uses isset(), so a key whose value is null is reported as not set.
   @known-bug
   Scenario: Get a key whose value is null
     When I run 'bin/ee config get nullkey'
     Then the exit code should be 0
     And STDERR should be empty
 
-  # CFG-2 (proposed): non-scalar values are echoed as "Array" (Array to string conversion).
+  # CFG-2: non-scalar values are echoed as "Array" (Array to string conversion).
   @known-bug
   Scenario: Get a nested value prints its contents
     When I run 'bin/ee config get parent'
@@ -175,8 +175,7 @@ Feature: ee config get
       child
       """
 
-  # CFG-5 (proposed): get prints through EE::log, so --quiet hides the value it was asked for.
-  @known-bug
+  # --quiet is ignored today (CFG-5). get prints through EE::log, so fixing quiet must not make it swallow the value.
   Scenario: Get still prints the value with --quiet
     When I run 'bin/ee config get le-mail --quiet'
     Then the exit code should be 0
@@ -185,7 +184,7 @@ Feature: ee config get
       admin@bh-config-command.test
       """
 
-  # CFG-8 (proposed): EE::log also writes to ee.log, so `config get` copies values (e.g. cloudflare-api-key) into the log.
+  # CFG-8: EE::log also writes to ee.log, so `config get` copies values (e.g. cloudflare-api-key) into the log.
   @known-bug
   Scenario: Get does not copy the value into ee.log
     Given a temporary ee config file with:
