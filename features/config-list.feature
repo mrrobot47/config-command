@@ -280,8 +280,7 @@ Feature: ee config list
       le-mail: admin@bh-config-command.test
       """
 
-  # CFG-8: --format=text prints through EE::log, which also writes every value (secrets included) to ee.log.
-  @known-bug
+  # CFG-8 (fixed in v4.13.2), regression check: --format=text prints through EE::log, which also writes every value (secrets included) to ee.log.
   Scenario: List --format=text does not copy values into ee.log
     Given a temporary ee config file with:
       """

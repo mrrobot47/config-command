@@ -184,8 +184,7 @@ Feature: ee config get
       admin@bh-config-command.test
       """
 
-  # CFG-8: EE::log also writes to ee.log, so `config get` copies values (e.g. cloudflare-api-key) into the log.
-  @known-bug
+  # CFG-8 (fixed in v4.13.2), regression check: EE::log also writes to ee.log, so `config get` copies values (e.g. cloudflare-api-key) into the log.
   Scenario: Get does not copy the value into ee.log
     Given a temporary ee config file with:
       """

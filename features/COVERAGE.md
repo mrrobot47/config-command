@@ -18,7 +18,7 @@ Suite for `ee config` (`src/Config_Command.php`). Every scenario except those in
 | `get` of a null value | `get()` isset | config-get.feature `@known-bug` CFG-1 |
 | `get` of a nested map | `get()` → `EE::log(array)` | config-get.feature `@known-bug` CFG-2 |
 | `get --quiet` still prints the value | `get()` uses `EE::log`; quiet is ignored (CFG-5) | config-get.feature: "Get still prints the value with --quiet" (guards the latent CFG-5 problem) |
-| `get` copies the value into ee.log | `EE::log` → file logger | config-get.feature `@known-bug` CFG-8 |
+| `get` copies the value into ee.log | `EE::log` → file logger | config-get.feature regression check, CFG-8 fixed in v4.13.2 |
 | `set <key> <value>`: new key (exact file content, no output), read back, overwrite keeps position, idempotent | `set()` | config-set.feature: first four scenarios |
 | `set`: numeric stored as quoted string, empty value, dotted key literal, replacing a nested map, multi-line value, leading/trailing spaces | `set()` + Spyc dump | config-set.feature: "Numeric values…", "An empty value…", "Dotted keys…", "Setting a key that holds a nested map…", "A multi-line value…", "A value with leading and trailing spaces…" |
 | `set`: 24 YAML-special values round-trip (true/false/yes/no/on/null/~/0/0123/1e3/1.50/`a: b`/`a #b`/`[1,2]`/`{a: b}`/-dash/spaces/email/URL with `#`/unicode/`%p`/`&`/`*`/`!`) | Spyc quoting | config-set.feature outline "Special value <value> round-trips unchanged" |
@@ -31,7 +31,7 @@ Suite for `ee config` (`src/Config_Command.php`). Every scenario except those in
 | `set` of `"quoted"` and `\|` values | Spyc dump | config-set.feature `@known-bug` CFG-6 (outline, 2 examples) |
 | `set` drops comments / rewrites unrelated `y`/`off` values | whole-file Spyc rewrite | config-set.feature `@known-bug` CFG-3 (2 scenarios) |
 | `set` on a symlinked config | Symfony `dumpFile()` rename | config-set.feature `@known-bug` CFG-7 |
-| `set` secret ends up in ee.log (argv debug line) | core `Runner::start()` | config-set.feature `@known-bug` CFG-8 |
+| `set` secret ends up in ee.log (argv debug line) | core `Runner::start()` | config-set.feature regression check, CFG-8 fixed in v4.13.2 |
 | `unset <key>`: removes only that key (exact content, no output), then get fails, twice (second fails), missing key (file byte-identical), case sensitivity, nested map, empty-string value | `unset()` | config-unset.feature: first seven scenarios |
 | `unset`: no arg, two args, unknown flag | core validation | config-unset.feature: "Unset without a key…", "Unset with two keys…", "Unset rejects unknown flags" |
 | `unset` keeps the file mode | Symfony `dumpFile()` | config-unset.feature: "Unset keeps the file mode" |
@@ -47,7 +47,7 @@ Suite for `ee config` (`src/Config_Command.php`). Every scenario except those in
 | `list --format=text` with nested map | `_list()` string concat | config-list.feature `@known-bug` CFG-2 |
 | `list` shows null keys that get can't read | isset vs list | config-list.feature `@known-bug` CFG-1 |
 | `list` (table/text) with `--quiet` | `EE::line`/`EE::log` go through the logger; quiet is ignored (CFG-5) | config-list.feature: "Human-readable formats still print with --quiet" |
-| `list --format=text` copies values into ee.log | `EE::log` → file logger | config-list.feature `@known-bug` CFG-8 |
+| `list --format=text` copies values into ee.log | `EE::log` → file logger | config-list.feature regression check, CFG-8 fixed in v4.13.2 |
 | Bootstrap: missing file/dirs created with `locale`/`ee_installer_version`, empty file, missing defaults appended, file untouched when defaults exist | core `Runner::ensure_present_in_config()` | config-path.feature: first four scenarios |
 | `EE_CONFIG_PATH` switching per invocation | all subcommands | config-path.feature: "EE_CONFIG_PATH switches files per invocation" |
 | Config keys that are global runtime parameters: hand-written `disabled_commands` list, `quiet` | core Configurator/Runner | config-path.feature: "A hand-written disabled_commands list…", "quiet in the config file does not hide…", "Setting quiet to false stores a string…" |
@@ -76,7 +76,7 @@ All are in `/root/workspace/issues.md` ("config-command" section), each reproduc
 - CFG-5 (Low, core): `--quiet` and `quiet:` never take effect (the logger is set up before the config is read). No failing scenario: the suspected "quiet hides get/list output" doesn't happen today; the quiet scenarios guard against it once quiet is fixed.
 - CFG-6 (Low): `"quoted"` and `|` values change after `set` then `get`.
 - CFG-7 (Low): `set`/`unset` replace a symlinked config with a regular file.
-- CFG-8 (Medium, security): secrets reach ee.log (`get` and `list --format=text` log values; core logs argv, so `set cloudflare-api-key <key>` persists the key).
+- CFG-8 (Medium, security): secrets reach ee.log (`get` and `list --format=text` log values; core logs argv, so `set cloudflare-api-key <key>` persists the key). Fixed in v4.13.2 (config-command#14, easyengine#1944); the three scenarios are regular now.
 - CFG-9 (Info): help text bugs ("Set a config value" on get, "Manges", incomplete README; the README part has no scenario).
 - CFG-10 (Low): a key containing a newline corrupts the config so every ee command dies.
 
