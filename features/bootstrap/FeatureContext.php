@@ -128,8 +128,8 @@ class FeatureContext implements Context
 		$command = $this->replaceVariables( $command );
 
 		// sudo resets the environment, so the command would silently use the real config.
-		if ( $this->tempConfigPath && preg_match( '/(^|[\s;&|])sudo\s+(?!-E\b)/', $command ) ) {
-			throw new Exception( "Refusing to run '$command': sudo drops EE_CONFIG_PATH. Drop sudo (the suite runs as root)." );
+		if ( $this->tempConfigPath && preg_match( '/\b(sudo|su)\b|\benv\s+-/', $command ) ) {
+			throw new Exception( "Refusing to run '$command': sudo, su and env options can drop EE_CONFIG_PATH. Drop them (the suite runs as root)." );
 		}
 
 		// Not EE::launch(): it copies the command's STDOUT/STDERR into ee.log, which would pollute log assertions.
@@ -458,23 +458,139 @@ class FeatureContext implements Context
 	/** @var string|null Per-scenario scratch dir (holds the temp config). */
 	private $scratchDir = null;
 
-	/** @var string|null|false Real config content at scenario start (null = file absent, false = not snapshotted). */
-	private $realConfigSnapshot = false;
-
-	/** @var int|null Real config mode at scenario start. */
-	private $realConfigMode = null;
-
 	/** @var array Remembered file sizes, keyed by path. */
 	private $rememberedSizes = [];
 
 	/** @var array Extra placeholder values set by steps. */
 	private $variables = [];
 
-	/** @var array Environment variables exported by steps, unset after the scenario. */
-	private $exportedEnv = [];
+	/** @var array Environment variables changed by this scenario => previous value (false = was unset). */
+	private $savedEnv = [];
+
+	/** @var resource|null Lock held for the whole run, so two runs never snapshot each other's changes. */
+	private static $runLock = null;
+
+	/**
+	 * On-disk copy of the real config, written before every scenario and removed once the file is verified intact.
+	 * It survives kill -9, so an interrupted run can be recovered (see recoverInterruptedRun()).
+	 */
+	const REAL_CONFIG_BACKUP = '/var/tmp/bh-config-command-real-config.backup';
+
+	/** Key the @destructive scenarios write to the real config; marks leftovers of an interrupted run. */
+	const REAL_CONFIG_MARKER = 'bh-config-command-key:';
+
+	/** @var array|null State of the real config at scenario start; null outside a scenario. Static so the shutdown handler sees it. */
+	private static $realConfigState = null;
+
+	/** @var bool */
+	private static $shutdownHandlerRegistered = false;
 
 	private static function realConfigPath() {
 		return EE_ROOT_DIR . '/config/config.yml';
+	}
+
+	/**
+	 * Content, mode, owner and symlink target of the real config.
+	 */
+	private static function captureRealConfig() {
+		$path = self::realConfigPath();
+		clearstatcache();
+		$state = [
+			'link'   => is_link( $path ) ? readlink( $path ) : null,
+			'exists' => is_file( $path ),
+		];
+		if ( $state['exists'] ) {
+			$content = file_get_contents( $path );
+			$stat    = stat( $path );
+			if ( false === $content || false === $stat ) {
+				throw new Exception( "Unable to read $path" );
+			}
+			$state['content'] = $content;
+			$state['mode']    = $stat['mode'] & 07777;
+			$state['uid']     = $stat['uid'];
+			$state['gid']     = $stat['gid'];
+		}
+
+		return $state;
+	}
+
+	/**
+	 * Puts the real config back as captured: same bytes (written atomically), mode, owner and symlink.
+	 */
+	private static function restoreRealConfig( array $state ) {
+		$path = self::realConfigPath();
+		clearstatcache();
+
+		if ( null !== $state['link'] ) {
+			if ( ! is_link( $path ) || readlink( $path ) !== $state['link'] ) {
+				if ( ( file_exists( $path ) || is_link( $path ) ) && ! unlink( $path ) ) {
+					throw new Exception( "Unable to remove $path to restore its symlink" );
+				}
+				if ( ! symlink( $state['link'], $path ) ) {
+					throw new Exception( "Unable to restore the symlink $path -> {$state['link']}" );
+				}
+			}
+			$dest = '/' === substr( $state['link'], 0, 1 ) ? $state['link'] : dirname( $path ) . '/' . $state['link'];
+		} else {
+			if ( is_link( $path ) && ! unlink( $path ) ) {
+				throw new Exception( "Unable to remove the symlink $path" );
+			}
+			$dest = $path;
+		}
+
+		if ( ! $state['exists'] ) {
+			if ( null === $state['link'] && file_exists( $path ) && ! unlink( $path ) ) {
+				throw new Exception( "Unable to remove $path, which did not exist before the scenario" );
+			}
+		} else {
+			// Temp file + rename, so concurrent ee runs never read a half-written config.
+			$tmp = $dest . '.bh-restore-' . getmypid();
+			if ( strlen( $state['content'] ) !== file_put_contents( $tmp, $state['content'] )
+				|| ! chmod( $tmp, $state['mode'] )
+				|| ! chown( $tmp, $state['uid'] )
+				|| ! chgrp( $tmp, $state['gid'] )
+				|| ! rename( $tmp, $dest ) ) {
+				@unlink( $tmp );
+				throw new Exception( "Unable to restore $dest" );
+			}
+		}
+
+		if ( ! self::sameState( self::captureRealConfig(), $state ) ) {
+			throw new Exception( "Restoring $path did not reproduce the original file; the original is saved in " . self::REAL_CONFIG_BACKUP );
+		}
+	}
+
+	private static function writeRealConfigBackup( array $state ) {
+		$tmp = self::REAL_CONFIG_BACKUP . '.tmp';
+		$old = umask( 077 );
+		// The config can hold secrets (cloudflare-api-key), hence 0600.
+		$meta = $state;
+		unset( $meta['content'] );
+		$ok = false !== file_put_contents( $tmp, json_encode( [ 'path' => self::realConfigPath(), 'state' => $meta, 'content_b64' => isset( $state['content'] ) ? base64_encode( $state['content'] ) : null ] ) );
+		umask( $old );
+		if ( ! $ok || ! chmod( $tmp, 0600 ) || ! rename( $tmp, self::REAL_CONFIG_BACKUP ) ) {
+			throw new Exception( 'Unable to write ' . self::REAL_CONFIG_BACKUP . '; refusing to run without a backup of the real config.' );
+		}
+	}
+
+	private static function readRealConfigBackup() {
+		$data = json_decode( (string) file_get_contents( self::REAL_CONFIG_BACKUP ), true );
+		if ( ! is_array( $data ) || ! isset( $data['state'] ) || self::realConfigPath() !== $data['path'] ) {
+			throw new Exception( self::REAL_CONFIG_BACKUP . ' is unreadable or belongs to another config path; inspect it and delete it by hand.' );
+		}
+		$state = $data['state'];
+		if ( $state['exists'] ) {
+			$state['content'] = base64_decode( $data['content_b64'] );
+		}
+
+		return $state;
+	}
+
+	private static function sameState( array $a, array $b ) {
+		ksort( $a );
+		ksort( $b );
+
+		return $a === $b;
 	}
 
 	private function replaceVariables( $string ) {
@@ -491,7 +607,13 @@ class FeatureContext implements Context
 			$vars['{CONFIG_DIR}']  = dirname( $this->tempConfigPath );
 		}
 
-		return strtr( $string, $vars );
+		$string = strtr( $string, $vars );
+		// A leftover placeholder would silently become a relative path (or the real config) in commands.
+		if ( preg_match( '/\{[A-Z][A-Z_]*\}/', $string, $m ) ) {
+			throw new Exception( "Placeholder {$m[0]} is not defined at this point of the scenario." );
+		}
+
+		return $string;
 	}
 
 	private function runId() {
@@ -573,6 +695,74 @@ class FeatureContext implements Context
 		return $value;
 	}
 
+	private function setEnv( $name, $value ) {
+		if ( ! array_key_exists( $name, $this->savedEnv ) ) {
+			$this->savedEnv[ $name ] = getenv( $name );
+		}
+		putenv( false === $value ? $name : "$name=$value" );
+	}
+
+	private function restoreEnv() {
+		foreach ( $this->savedEnv as $name => $value ) {
+			putenv( false === $value ? $name : "$name=$value" );
+		}
+		$this->savedEnv = [];
+	}
+
+	/** Changed top-level keys only: failure messages must not print the real config (it can hold secrets). */
+	private static function describeRealConfigChange( array $before, array $after ) {
+		$load = function ( array $state ) {
+			return $state['exists'] ? (array) \Mustangostang\Spyc::YAMLLoadString( $state['content'] ) : [];
+		};
+		$a    = $load( $before );
+		$b    = $load( $after );
+		$keys = [];
+		foreach ( array_unique( array_merge( array_keys( $a ), array_keys( $b ) ) ) as $key ) {
+			if ( ! array_key_exists( $key, $a ) || ! array_key_exists( $key, $b ) || $a[ $key ] !== $b[ $key ] ) {
+				$keys[] = $key;
+			}
+		}
+		$meta = [];
+		foreach ( [ 'exists', 'link', 'mode', 'uid', 'gid' ] as $field ) {
+			$x = isset( $before[ $field ] ) ? $before[ $field ] : null;
+			$y = isset( $after[ $field ] ) ? $after[ $field ] : null;
+			if ( $x !== $y ) {
+				$meta[] = "$field: " . var_export( $x, true ) . ' -> ' . var_export( $y, true );
+			}
+		}
+
+		return 'Changed keys: ' . ( $keys ? implode( ', ', $keys ) : '(none; formatting or comments only)' ) . ( $meta ? '; ' . implode( '; ', $meta ) : '' );
+	}
+
+	/**
+	 * Recovers the real config after a run that died mid-scenario (kill -9, power loss).
+	 *
+	 * @BeforeSuite
+	 */
+	public static function recoverInterruptedRun() {
+		self::$runLock = fopen( self::REAL_CONFIG_BACKUP . '.lock', 'c' );
+		if ( ! self::$runLock || ! flock( self::$runLock, LOCK_EX | LOCK_NB ) ) {
+			throw new Exception( 'Another run of this suite holds ' . self::REAL_CONFIG_BACKUP . '.lock; runs must not overlap.' );
+		}
+		if ( ! file_exists( self::REAL_CONFIG_BACKUP ) ) {
+			return;
+		}
+		$state   = self::readRealConfigBackup();
+		$current = self::captureRealConfig();
+		if ( self::sameState( $state, $current ) ) {
+			unlink( self::REAL_CONFIG_BACKUP );
+			return;
+		}
+		// Only undo what is recognisably ours; anything else may be a legitimate change made since.
+		if ( isset( $current['content'] ) && false !== strpos( $current['content'], self::REAL_CONFIG_MARKER ) ) {
+			self::restoreRealConfig( $state );
+			unlink( self::REAL_CONFIG_BACKUP );
+			fwrite( STDERR, 'Restored ' . self::realConfigPath() . ' from ' . self::REAL_CONFIG_BACKUP . ", left by an interrupted run.\n" );
+			return;
+		}
+		throw new Exception( self::REAL_CONFIG_BACKUP . ' was left by an interrupted run and ' . self::realConfigPath() . ' differs from it (' . self::describeRealConfigChange( $state, $current ) . '). Restore the config from the backup by hand if the change is ours, then delete the backup.' );
+	}
+
 	/**
 	 * @BeforeScenario
 	 */
@@ -580,10 +770,58 @@ class FeatureContext implements Context
 		// An EE_CONFIG_PATH inherited from the caller's shell must not leak into scenarios.
 		putenv( 'EE_CONFIG_PATH' );
 		unset( $_ENV['EE_CONFIG_PATH'] );
+		// Help output goes through $PAGER (less -r by default), and host php.ini decides where PHP notices go.
+		$this->setEnv( 'PAGER', 'cat' );
+		if ( false === getenv( 'EE_PHP_ARGS' ) ) {
+			$this->setEnv( 'EE_PHP_ARGS', '-d display_errors=0 -d log_errors=1 -d error_log= -d error_reporting=' . ( E_ALL & ~E_DEPRECATED ) );
+		}
 
-		$path                     = self::realConfigPath();
-		$this->realConfigSnapshot = is_file( $path ) ? file_get_contents( $path ) : null;
-		$this->realConfigMode     = is_file( $path ) ? ( fileperms( $path ) & 0777 ) : null;
+		if ( file_exists( self::REAL_CONFIG_BACKUP ) ) {
+			throw new Exception( self::REAL_CONFIG_BACKUP . ' still exists: restoring ' . self::realConfigPath() . ' failed earlier in this run. Fix it by hand before running more scenarios.' );
+		}
+		$state = self::captureRealConfig();
+		self::writeRealConfigBackup( $state );
+		self::$realConfigState = $state;
+		self::registerShutdownHandler();
+	}
+
+	private static function registerShutdownHandler() {
+		if ( self::$shutdownHandlerRegistered ) {
+			return;
+		}
+		self::$shutdownHandlerRegistered = true;
+		// Behat turns SIGINT into exit() without AfterScenario, and an Error in a step is fatal; both still run shutdown functions.
+		register_shutdown_function( [ __CLASS__, 'restoreRealConfigOnShutdown' ] );
+		if ( function_exists( 'pcntl_signal' ) && function_exists( 'pcntl_async_signals' ) ) {
+			pcntl_async_signals( true );
+			foreach ( [ 'SIGTERM', 'SIGHUP' ] as $signal ) {
+				if ( defined( $signal ) ) {
+					pcntl_signal(
+						constant( $signal ),
+						function ( $signo ) {
+							exit( 128 + $signo );
+						}
+					);
+				}
+			}
+		}
+	}
+
+	public static function restoreRealConfigOnShutdown() {
+		$state = self::$realConfigState;
+		if ( null === $state ) {
+			return;
+		}
+		try {
+			if ( ! self::sameState( $state, self::captureRealConfig() ) ) {
+				self::restoreRealConfig( $state );
+				fwrite( STDERR, 'Restored ' . self::realConfigPath() . " after an interrupted scenario.\n" );
+			}
+			self::$realConfigState = null;
+			unlink( self::REAL_CONFIG_BACKUP );
+		} catch ( \Throwable $e ) {
+			fwrite( STDERR, 'Could not restore ' . self::realConfigPath() . ': ' . $e->getMessage() . "\nThe original is saved in " . self::REAL_CONFIG_BACKUP . "\n" );
+		}
 	}
 
 	/**
@@ -592,44 +830,38 @@ class FeatureContext implements Context
 	 * @AfterScenario
 	 */
 	public function restoreConfigState( AfterScenarioScope $scope ) {
+		// The real config first: nothing below may prevent its restore.
+		$state = self::$realConfigState;
+		if ( null !== $state ) {
+			$current = self::captureRealConfig();
+			$changed = ! self::sameState( $state, $current );
+			if ( $changed ) {
+				// Throws (keeping the backup and the state for the shutdown handler) if the restore can't be verified.
+				self::restoreRealConfig( $state );
+			}
+			self::$realConfigState = null;
+			if ( ! unlink( self::REAL_CONFIG_BACKUP ) ) {
+				throw new Exception( 'Unable to remove ' . self::REAL_CONFIG_BACKUP );
+			}
+		}
+
 		putenv( 'EE_CONFIG_PATH' );
 		unset( $_ENV['EE_CONFIG_PATH'] );
+		$this->restoreEnv();
 		$this->tempConfigPath  = null;
 		$this->variables       = [];
 		$this->rememberedSizes = [];
-		foreach ( $this->exportedEnv as $name ) {
-			putenv( $name );
-		}
-		$this->exportedEnv = [];
 
 		if ( $this->scratchDir && 0 === strpos( $this->scratchDir, sys_get_temp_dir() . '/' . self::SITE_PREFIX ) ) {
 			exec( 'rm -rf ' . escapeshellarg( $this->scratchDir ) );
 		}
 		$this->scratchDir = null;
 
-		if ( false === $this->realConfigSnapshot ) {
-			return;
-		}
-
-		$path    = self::realConfigPath();
-		$current = is_file( $path ) ? file_get_contents( $path ) : null;
-		if ( $current === $this->realConfigSnapshot && ! is_link( $path ) ) {
-			return;
-		}
-
-		if ( null === $this->realConfigSnapshot ) {
-			@unlink( $path );
-		} else {
-			if ( is_link( $path ) ) {
-				unlink( $path );
+		if ( null !== $state && $changed ) {
+			$tags = array_merge( $scope->getFeature()->getTags(), $scope->getScenario()->getTags() );
+			if ( ! in_array( 'destructive', $tags, true ) ) {
+				throw new Exception( 'Scenario modified the real ' . self::realConfigPath() . ' without the @destructive tag; it has been restored (if another process changed it meanwhile, re-apply that change). ' . self::describeRealConfigChange( $state, $current ) );
 			}
-			file_put_contents( $path, $this->realConfigSnapshot );
-			chmod( $path, $this->realConfigMode );
-		}
-
-		$tags = array_merge( $scope->getFeature()->getTags(), $scope->getScenario()->getTags() );
-		if ( ! in_array( 'destructive', $tags, true ) ) {
-			throw new Exception( "Scenario modified the real $path without the @destructive tag. It has been restored.\nContent it wrote:\n" . var_export( $current, true ) );
 		}
 	}
 
@@ -691,21 +923,29 @@ class FeatureContext implements Context
 	 * @Then the real ee config file should be unchanged
 	 */
 	public function theRealEeConfigFileShouldBeUnchanged() {
-		$path    = self::realConfigPath();
-		$current = is_file( $path ) ? file_get_contents( $path ) : null;
-		if ( $current !== $this->realConfigSnapshot ) {
-			throw new Exception( "The real $path changed.\nBefore:\n" . var_export( $this->realConfigSnapshot, true ) . "\nNow:\n" . var_export( $current, true ) );
+		$current = self::captureRealConfig();
+		if ( ! self::sameState( self::requireRealConfigState(), $current ) ) {
+			throw new Exception( 'The real ' . self::realConfigPath() . ' changed. ' . self::describeRealConfigChange( self::requireRealConfigState(), $current ) );
 		}
+	}
+
+	private static function requireRealConfigState() {
+		if ( null === self::$realConfigState ) {
+			throw new Exception( 'The real ee config was not snapshotted for this scenario.' );
+		}
+
+		return self::$realConfigState;
 	}
 
 	/**
 	 * @Then the real ee config file should have the same values as before
 	 */
 	public function theRealEeConfigFileShouldHaveTheSameValuesAsBefore() {
-		$before = null === $this->realConfigSnapshot ? [] : \Mustangostang\Spyc::YAMLLoadString( $this->realConfigSnapshot );
+		$state  = self::requireRealConfigState();
+		$before = $state['exists'] ? \Mustangostang\Spyc::YAMLLoadString( $state['content'] ) : [];
 		$now    = self::loadYamlFile( self::realConfigPath() );
 		if ( $before !== $now ) {
-			throw new Exception( "Real config values differ.\nBefore: " . json_encode( $before ) . "\nNow: " . json_encode( $now ) );
+			throw new Exception( 'Real config values differ. ' . self::describeRealConfigChange( $state, self::captureRealConfig() ) );
 		}
 	}
 
@@ -718,8 +958,7 @@ class FeatureContext implements Context
 		if ( 'EE_CONFIG_PATH' === $name ) {
 			throw new Exception( 'Use a temporary ee config step to set EE_CONFIG_PATH.' );
 		}
-		putenv( $name . '=' . $this->replaceVariables( $value ) );
-		$this->exportedEnv[] = $name;
+		$this->setEnv( $name, $this->replaceVariables( $value ) );
 	}
 
 	/**
@@ -728,9 +967,11 @@ class FeatureContext implements Context
 	public function theRealEeConfigFileShouldHaveTheSameModeAsBefore() {
 		clearstatcache();
 		$path   = self::realConfigPath();
-		$actual = is_file( $path ) ? ( fileperms( $path ) & 0777 ) : null;
-		if ( $actual !== $this->realConfigMode ) {
-			throw new Exception( sprintf( 'Mode of %s changed from %s to %s', $path, var_export( $this->realConfigMode, true ), null === $actual ? 'missing' : sprintf( '%04o', $actual ) ) );
+		$state    = self::requireRealConfigState();
+		$expected = $state['exists'] ? $state['mode'] : null;
+		$actual   = is_file( $path ) ? ( fileperms( $path ) & 07777 ) : null;
+		if ( $actual !== $expected ) {
+			throw new Exception( sprintf( 'Mode of %s changed from %s to %s', $path, null === $expected ? 'missing' : sprintf( '%04o', $expected ), null === $actual ? 'missing' : sprintf( '%04o', $actual ) ) );
 		}
 	}
 
@@ -741,7 +982,8 @@ class FeatureContext implements Context
 		$dir = $this->scratchDir() . '/failing-docker-bin';
 		mkdir( $dir, 0700, true );
 		foreach ( [ 'docker', 'docker-compose' ] as $bin ) {
-			file_put_contents( "$dir/$bin", "#!/bin/sh\necho 'fake $bin: unavailable' >&2\nexit 1\n" );
+			// Each call is recorded, so a scenario can prove the shims were never run.
+			file_put_contents( "$dir/$bin", "#!/bin/sh\necho \"$bin \$*\" >> '$dir/calls'\necho 'fake $bin: unavailable' >&2\nexit 1\n" );
 			chmod( "$dir/$bin", 0755 );
 		}
 		$this->variables['{FAILING_DOCKER_DIR}'] = $dir;
@@ -799,9 +1041,10 @@ class FeatureContext implements Context
 		if ( ! is_file( $path ) ) {
 			throw new Exception( "$path does not exist." );
 		}
-		$actual = file_get_contents( $path );
-		if ( rtrim( $expected->getRaw(), "\n" ) !== rtrim( $actual, "\n" ) ) {
-			throw new Exception( "Content of $path differs.\nExpected:\n" . $expected->getRaw() . "\nActual:\n" . $actual );
+		$actual   = file_get_contents( $path );
+		$expected = $this->replaceVariables( $expected->getRaw() );
+		if ( rtrim( $expected, "\n" ) !== rtrim( $actual, "\n" ) ) {
+			throw new Exception( "Content of $path differs.\nExpected:\n" . $expected . "\nActual:\n" . $actual );
 		}
 	}
 
@@ -809,8 +1052,11 @@ class FeatureContext implements Context
 	 * @Then the file :path should contain:
 	 */
 	public function theFileShouldContain( $path, PyStringNode $expected ) {
-		$path   = $this->replaceVariables( $path );
-		$actual = is_file( $path ) ? file_get_contents( $path ) : '';
+		$path = $this->replaceVariables( $path );
+		if ( ! is_file( $path ) ) {
+			throw new Exception( "$path does not exist." );
+		}
+		$actual = file_get_contents( $path );
 		if ( false === strpos( $actual, $this->replaceVariables( $expected->getRaw() ) ) ) {
 			throw new Exception( "$path does not contain:\n" . $expected->getRaw() . "\nActual:\n" . $actual );
 		}
@@ -820,8 +1066,11 @@ class FeatureContext implements Context
 	 * @Then the file :path should not contain:
 	 */
 	public function theFileShouldNotContain( $path, PyStringNode $unexpected ) {
-		$path   = $this->replaceVariables( $path );
-		$actual = is_file( $path ) ? file_get_contents( $path ) : '';
+		$path = $this->replaceVariables( $path );
+		if ( ! is_file( $path ) ) {
+			throw new Exception( "$path does not exist." );
+		}
+		$actual = file_get_contents( $path );
 		if ( false !== strpos( $actual, $this->replaceVariables( $unexpected->getRaw() ) ) ) {
 			throw new Exception( "$path unexpectedly contains:\n" . $unexpected->getRaw() . "\nActual:\n" . $actual );
 		}
@@ -846,9 +1095,15 @@ class FeatureContext implements Context
 			throw new Exception( "Size of $path was not remembered earlier in the scenario." );
 		}
 		clearstatcache();
-		$content = is_file( $path ) ? file_get_contents( $path ) : '';
+		if ( ! is_file( $path ) ) {
+			throw new Exception( "$path does not exist, so nothing can be said about what was logged." );
+		}
+		$content = file_get_contents( $path );
 		// A rotated (shrunk) file is checked as a whole.
 		$appended = strlen( $content ) >= $this->rememberedSizes[ $path ] ? substr( $content, $this->rememberedSizes[ $path ] ) : $content;
+		if ( '' === $appended ) {
+			throw new Exception( "Nothing was appended to $path, so the command didn't log there and the check would be vacuous." );
+		}
 		$lines    = array_filter(
 			explode( "\n", $appended ),
 			function ( $line ) use ( $text ) {
@@ -865,6 +1120,7 @@ class FeatureContext implements Context
 	 */
 	public function theYamlFileShouldHaveKeyWithValue( $path, $key, $value ) {
 		$path   = $this->replaceVariables( $path );
+		$value  = $this->replaceVariables( $value );
 		$config = self::loadYamlFile( $path );
 		if ( ! array_key_exists( $key, $config ) ) {
 			throw new Exception( "Key '$key' not found in $path. Keys: " . implode( ', ', array_keys( $config ) ) );
