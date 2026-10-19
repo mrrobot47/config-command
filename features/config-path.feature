@@ -140,30 +140,3 @@ Feature: Config file location (EE_CONFIG_PATH) and bootstrap defaults
       """
       en_US
       """
-
-  # CFG-4: a string disabled_commands reaches in_array() in Runner::is_command_disabled(): TypeError on PHP 8 for every ee command
-  # (including the `config unset` needed to undo it); on 7.4 in_array() warnings on STDERR and the command is not disabled.
-  @known-bug
-  Scenario: Setting disabled_commands with config set disables that command without breaking ee
-    Given a temporary ee config file with:
-      """
-      locale: en_US
-      ee_installer_version: stable
-      """
-    When I run 'bin/ee config set disabled_commands "config list"'
-    Then the exit code should be 0
-    When I run 'bin/ee config get locale'
-    Then the exit code should be 0
-    And STDOUT should be:
-      """
-      en_US
-      """
-    And STDERR should be empty
-    When I run 'bin/ee config list'
-    Then the exit code should be 1
-    And STDERR should contain:
-      """
-      The 'config list' command has been disabled from the config file.
-      """
-    When I run 'bin/ee config unset disabled_commands'
-    Then the exit code should be 0

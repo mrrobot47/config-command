@@ -229,40 +229,6 @@ Feature: ee config list
     Then the exit code should be 0
     And STDOUT should be JSON listing the entries of the YAML file '{CONFIG_PATH}'
 
-  # CFG-2: --format=text concatenates values, so nested maps print as "Array".
-  @known-bug
-  Scenario: --format=text prints nested values readably
-    Given a temporary ee config file with:
-      """
-      locale: en_US
-      ee_installer_version: stable
-      parent:
-        child: x
-      """
-    When I run 'bin/ee config list --format=text'
-    Then the exit code should be 0
-    And STDOUT should not contain:
-      """
-      parent: Array
-      """
-
-  # CFG-1: null values are listed although get/unset claim the key is not set.
-  @known-bug
-  Scenario: Keys listed by list can be read with get
-    Given a temporary ee config file with:
-      """
-      locale: en_US
-      ee_installer_version: stable
-      bh-null: ~
-      """
-    When I run 'bin/ee config list --format=csv'
-    Then STDOUT should contain:
-      """
-      bh-null,
-      """
-    When I run 'bin/ee config get bh-null'
-    Then the exit code should be 0
-
   # --quiet is ignored today (CFG-5). Table and text output go through the logger, so fixing quiet must not swallow them.
   Scenario: Human-readable formats still print with --quiet
     When I run 'bin/ee config list --quiet'

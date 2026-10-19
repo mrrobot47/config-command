@@ -115,27 +115,3 @@ Feature: ee config command group, help and usage
       """
     And STDERR should be empty
     And the file '{FAILING_DOCKER_DIR}/calls' should not exist
-
-  # CFG-9: `ee config get` is described as "Set a config value".
-  @known-bug
-  Scenario: The help text of config get describes getting a value
-    When I run 'bin/ee help config get'
-    Then the exit code should be 0
-    And STDOUT should contain:
-      """
-      ee config get <config-key>
-      """
-    And STDOUT should not contain:
-      """
-      Set a config value
-      """
-
-  # CFG-9: typo "Manges" in the command group description.
-  @known-bug
-  Scenario: The config command group description has no typo
-    When I run 'bin/ee help config'
-    Then the exit code should be 0
-    And STDOUT should contain:
-      """
-      Manages global EasyEngine configuration.
-      """

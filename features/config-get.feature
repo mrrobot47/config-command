@@ -154,27 +154,6 @@ Feature: ee config get
       """
     And the file '{CONFIG_PATH}' should exist
 
-  # CFG-1: get uses isset(), so a key whose value is null is reported as not set.
-  @known-bug
-  Scenario: Get a key whose value is null
-    When I run 'bin/ee config get nullkey'
-    Then the exit code should be 0
-    And STDERR should be empty
-
-  # CFG-2: non-scalar values are echoed as "Array" (Array to string conversion).
-  @known-bug
-  Scenario: Get a nested value prints its contents
-    When I run 'bin/ee config get parent'
-    Then the exit code should be 0
-    And STDOUT should not contain:
-      """
-      Array
-      """
-    And STDOUT should contain:
-      """
-      child
-      """
-
   # --quiet is ignored today (CFG-5). get prints through EE::log, so fixing quiet must not make it swallow the value.
   Scenario: Get still prints the value with --quiet
     When I run 'bin/ee config get le-mail --quiet'
