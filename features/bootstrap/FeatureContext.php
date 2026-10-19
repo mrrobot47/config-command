@@ -495,6 +495,13 @@ class FeatureContext implements Context
 			'link'   => is_link( $path ) ? readlink( $path ) : null,
 			'exists' => is_file( $path ),
 		];
+		if ( null !== $state['link'] ) {
+			$target = '/' === substr( $state['link'], 0, 1 ) ? $state['link'] : dirname( $path ) . '/' . $state['link'];
+			// The restore rewrites the first link's target, which would replace a further link with a file.
+			if ( is_link( $target ) ) {
+				throw new Exception( "$path is a chain of symlinks; only a single symlink to the real file is supported." );
+			}
+		}
 		if ( $state['exists'] ) {
 			$content = file_get_contents( $path );
 			$stat    = stat( $path );
@@ -1355,7 +1362,8 @@ class FeatureContext implements Context
 	 * @Then STDOUT should be JSON listing the entries of the YAML file :path
 	 */
 	public function stdoutShouldBeJsonListingTheEntriesOfTheYamlFile( $path ) {
-		$config   = self::loadYamlFile( $this->replaceVariables( $path ) );
+		$file     = $this->replaceVariables( $path );
+		$config   = self::loadYamlFile( $file );
 		$expected = [];
 		foreach ( $config as $key => $value ) {
 			$expected[] = [
@@ -1366,6 +1374,10 @@ class FeatureContext implements Context
 		$actual = json_decode( $this->lastOutput( 'STDOUT' ) );
 		// Encoded the way ee encodes it, so maps become objects and lists stay lists.
 		if ( self::normalizeJson( json_decode( json_encode( $expected ) ) ) !== self::normalizeJson( $actual ) ) {
+			// The real config can hold credentials (cloudflare-api-key), so no values or output then.
+			if ( false !== realpath( $file ) && realpath( $file ) === realpath( self::realConfigPath() ) ) {
+				throw new Exception( 'STDOUT does not list the entries of the real config (values omitted).' );
+			}
 			throw new Exception( 'Expected: ' . json_encode( $expected ) . "\n\n" . $this->describeLastCommand() );
 		}
 	}
