@@ -3,6 +3,9 @@ Feature: Default config location (/opt/easyengine/config/config.yml)
   These scenarios run without EE_CONFIG_PATH, so they read or write the real global config.
   The context snapshots the real file before every scenario and restores it byte-for-byte afterwards.
 
+  Background:
+    Given the real ee config file exists
+
   Scenario: Without EE_CONFIG_PATH, list reads the real global config
     When I run 'bin/ee config list --format=json'
     Then the exit code should be 0

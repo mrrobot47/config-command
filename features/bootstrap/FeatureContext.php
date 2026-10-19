@@ -92,6 +92,7 @@ class FeatureContext implements Context
 	 */
 	public function eePharIsPresent()
 	{
+		self::$pharGenerated = true;
 		// Checks if phar already exists, replaces it
 		if(file_exists('ee-old.phar')) {
 			// Below exec call is required as currenly `ee cli update` is ran with root
@@ -423,6 +424,15 @@ class FeatureContext implements Context
 	 */
 	public static function cleanup(AfterFeatureScope $scope)
 	{
+		// Only phars built by "ee phar is generated", never a build of the checkout's owner.
+		if ( self::$pharGenerated ) {
+			foreach ( [ 'ee.phar', 'ee-old.phar' ] as $phar ) {
+				if ( file_exists( $phar ) ) {
+					unlink( $phar );
+				}
+			}
+		}
+
 		// Avoid invoking ee (and the live stack) when this suite left no sites behind.
 		if ( ! glob( EE_SITE_ROOT . '/' . self::SITE_PREFIX . '*' ) ) {
 			return;
@@ -433,13 +443,6 @@ class FeatureContext implements Context
 			if ( 0 === strpos( $site, self::SITE_PREFIX ) ) {
 				exec( 'bin/ee site delete ' . escapeshellarg( $site ) . ' --yes' );
 			}
-		}
-
-		if(file_exists('ee.phar')) {
-			unlink('ee.phar');
-		}
-		if(file_exists('ee-old.phar')) {
-			unlink('ee-old.phar');
 		}
 	}
 
@@ -469,6 +472,9 @@ class FeatureContext implements Context
 
 	/** @var resource|null Lock held for the whole run, so two runs never snapshot each other's changes. */
 	private static $runLock = null;
+
+	/** @var bool Whether "ee phar is generated" ran, so the cleanup may remove ee.phar and ee-old.phar. */
+	private static $pharGenerated = false;
 
 	/**
 	 * On-disk copy of the real config, written before every scenario and removed once the file is verified intact.
@@ -539,14 +545,18 @@ class FeatureContext implements Context
 		}
 
 		if ( ! $state['exists'] ) {
-			if ( null === $state['link'] && file_exists( $path ) && ! unlink( $path ) ) {
-				throw new Exception( "Unable to remove $path, which did not exist before the scenario" );
+			// For a dangling symlink $dest is its target, which a scenario may have created.
+			if ( is_file( $dest ) && ! is_link( $dest ) && ! unlink( $dest ) ) {
+				throw new Exception( "Unable to remove $dest, which did not exist before the scenario" );
 			}
 		} else {
 			// Temp file + rename, so concurrent ee runs never read a half-written config.
 			$tmp = $dest . '.bh-restore-' . getmypid();
-			if ( strlen( $state['content'] ) !== file_put_contents( $tmp, $state['content'] )
-				|| ! chmod( $tmp, $state['mode'] )
+			// Private from the first byte: the config can hold secrets.
+			$old = umask( 077 );
+			$written = file_put_contents( $tmp, $state['content'] );
+			umask( $old );
+			if ( strlen( $state['content'] ) !== $written
 				|| ! chown( $tmp, $state['uid'] )
 				|| ! chgrp( $tmp, $state['gid'] )
 				|| ! rename( $tmp, $dest ) ) {
@@ -562,18 +572,35 @@ class FeatureContext implements Context
 
 	private static function writeRealConfigBackup( array $state ) {
 		$tmp = self::REAL_CONFIG_BACKUP . '.tmp';
+		// /var/tmp is shared: never reuse a file (or symlink) someone else put at the temp path.
+		if ( ( file_exists( $tmp ) || is_link( $tmp ) ) && ! unlink( $tmp ) ) {
+			throw new Exception( "Unable to remove the stale $tmp" );
+		}
 		$old = umask( 077 );
 		// The config can hold secrets (cloudflare-api-key), hence 0600.
 		$meta = $state;
 		unset( $meta['content'] );
-		$ok = false !== file_put_contents( $tmp, json_encode( [ 'path' => self::realConfigPath(), 'state' => $meta, 'content_b64' => isset( $state['content'] ) ? base64_encode( $state['content'] ) : null ] ) );
+		$fh = fopen( $tmp, 'x' );
+		$ok = $fh && false !== fwrite( $fh, json_encode( [ 'path' => self::realConfigPath(), 'state' => $meta, 'content_b64' => isset( $state['content'] ) ? base64_encode( $state['content'] ) : null ] ) ) && fclose( $fh );
 		umask( $old );
 		if ( ! $ok || ! chmod( $tmp, 0600 ) || ! rename( $tmp, self::REAL_CONFIG_BACKUP ) ) {
 			throw new Exception( 'Unable to write ' . self::REAL_CONFIG_BACKUP . '; refusing to run without a backup of the real config.' );
 		}
 	}
 
+	/**
+	 * A leftover in shared /var/tmp is only trusted when it's a regular file of ours that nobody else can write.
+	 */
+	private static function assertTrustedFile( $path ) {
+		clearstatcache();
+		$stat = lstat( $path );
+		if ( is_link( $path ) || ! is_file( $path ) || false === $stat || posix_geteuid() !== $stat['uid'] || ( $stat['mode'] & 022 ) ) {
+			throw new Exception( "$path is not a regular file owned by this user and writable only by it; refusing to use it. Inspect it and delete it by hand." );
+		}
+	}
+
 	private static function readRealConfigBackup() {
+		self::assertTrustedFile( self::REAL_CONFIG_BACKUP );
 		$data = json_decode( (string) file_get_contents( self::REAL_CONFIG_BACKUP ), true );
 		if ( ! is_array( $data ) || ! isset( $data['state'] ) || self::realConfigPath() !== $data['path'] ) {
 			throw new Exception( self::REAL_CONFIG_BACKUP . ' is unreadable or belongs to another config path; inspect it and delete it by hand.' );
@@ -695,6 +722,20 @@ class FeatureContext implements Context
 		return $value;
 	}
 
+	/**
+	 * Decoded JSON (objects as stdClass) with object keys sorted; objects are wrapped so they never equal a list.
+	 */
+	private static function normalizeJson( $value ) {
+		if ( $value instanceof \stdClass ) {
+			$value = (array) $value;
+			ksort( $value );
+
+			return [ '{}' => array_map( [ __CLASS__, 'normalizeJson' ], $value ) ];
+		}
+
+		return is_array( $value ) ? array_map( [ __CLASS__, 'normalizeJson' ], $value ) : $value;
+	}
+
 	private function setEnv( $name, $value ) {
 		if ( ! array_key_exists( $name, $this->savedEnv ) ) {
 			$this->savedEnv[ $name ] = getenv( $name );
@@ -740,7 +781,13 @@ class FeatureContext implements Context
 	 * @BeforeSuite
 	 */
 	public static function recoverInterruptedRun() {
-		self::$runLock = fopen( self::REAL_CONFIG_BACKUP . '.lock', 'c' );
+		$lock = self::REAL_CONFIG_BACKUP . '.lock';
+		if ( file_exists( $lock ) || is_link( $lock ) ) {
+			self::assertTrustedFile( $lock );
+		}
+		$old = umask( 077 );
+		self::$runLock = fopen( $lock, 'c' );
+		umask( $old );
 		if ( ! self::$runLock || ! flock( self::$runLock, LOCK_EX | LOCK_NB ) ) {
 			throw new Exception( 'Another run of this suite holds ' . self::REAL_CONFIG_BACKUP . '.lock; runs must not overlap.' );
 		}
@@ -799,6 +846,16 @@ class FeatureContext implements Context
 					pcntl_signal(
 						constant( $signal ),
 						function ( $signo ) {
+							// Stop and reap the running command first, so it can't write the config after the restore.
+							$children = @file_get_contents( '/proc/self/task/' . getmypid() . '/children' );
+							if ( $children && function_exists( 'posix_kill' ) ) {
+								foreach ( preg_split( '/\s+/', trim( $children ) ) as $pid ) {
+									posix_kill( (int) $pid, $signo );
+								}
+								while ( pcntl_waitpid( -1, $status ) > 0 ) {
+									continue;
+								}
+							}
 							exit( 128 + $signo );
 						}
 					);
@@ -935,6 +992,17 @@ class FeatureContext implements Context
 		}
 
 		return self::$realConfigState;
+	}
+
+	/**
+	 * The global-config scenarios compare against the real file, so it must exist (any ee command on an initialised install creates it).
+	 *
+	 * @Given the real ee config file exists
+	 */
+	public function theRealEeConfigFileExists() {
+		if ( ! self::requireRealConfigState()['exists'] ) {
+			throw new Exception( self::realConfigPath() . ' does not exist; these scenarios need an initialised EasyEngine.' );
+		}
 	}
 
 	/**
@@ -1218,15 +1286,15 @@ class FeatureContext implements Context
 	 * @Then STDOUT should be JSON equal to:
 	 */
 	public function stdoutShouldBeJsonEqualTo( PyStringNode $expected ) {
-		$actual = json_decode( $this->lastOutput( 'STDOUT' ), true );
+		$actual = json_decode( $this->lastOutput( 'STDOUT' ) );
 		if ( JSON_ERROR_NONE !== json_last_error() ) {
 			throw new Exception( 'STDOUT is not valid JSON: ' . json_last_error_msg() . "\n\n" . $this->describeLastCommand() );
 		}
-		$wanted = json_decode( $this->replaceVariables( $expected->getRaw() ), true );
+		$wanted = json_decode( $this->replaceVariables( $expected->getRaw() ) );
 		if ( JSON_ERROR_NONE !== json_last_error() ) {
 			throw new Exception( 'Expected value is not valid JSON: ' . json_last_error_msg() );
 		}
-		if ( self::normalizeForCompare( $wanted ) !== self::normalizeForCompare( $actual ) ) {
+		if ( self::normalizeJson( $wanted ) !== self::normalizeJson( $actual ) ) {
 			throw new Exception( 'JSON differs from: ' . json_encode( $wanted ) . "\n\n" . $this->describeLastCommand() );
 		}
 	}
@@ -1304,8 +1372,9 @@ class FeatureContext implements Context
 				'value' => $value,
 			];
 		}
-		$actual = json_decode( $this->lastOutput( 'STDOUT' ), true );
-		if ( $expected !== $actual ) {
+		$actual = json_decode( $this->lastOutput( 'STDOUT' ) );
+		// Encoded the way ee encodes it, so maps become objects and lists stay lists.
+		if ( self::normalizeJson( json_decode( json_encode( $expected ) ) ) !== self::normalizeJson( $actual ) ) {
 			throw new Exception( 'Expected: ' . json_encode( $expected ) . "\n\n" . $this->describeLastCommand() );
 		}
 	}
