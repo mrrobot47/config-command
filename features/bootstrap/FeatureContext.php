@@ -857,11 +857,25 @@ class FeatureContext implements Context
 					pcntl_signal(
 						constant( $signal ),
 						function ( $signo ) {
-							// Stop and reap the running command first, so it can't write the config after the restore.
-							$children = @file_get_contents( '/proc/self/task/' . getmypid() . '/children' );
-							if ( $children && function_exists( 'posix_kill' ) ) {
-								foreach ( preg_split( '/\s+/', trim( $children ) ) as $pid ) {
-									posix_kill( (int) $pid, $signo );
+							// Stop the whole command tree (sh -> bin/ee -> php) first, so nothing writes the config after the restore.
+							$tree = self::descendants( getmypid() );
+							if ( $tree && function_exists( 'posix_kill' ) ) {
+								foreach ( $tree as $pid ) {
+									posix_kill( $pid, $signo );
+								}
+								$deadline = microtime( true ) + 10;
+								while ( true ) {
+									while ( pcntl_waitpid( -1, $status, WNOHANG ) > 0 ) {
+										continue;
+									}
+									$alive = array_filter( $tree, [ __CLASS__, 'isAlive' ] );
+									if ( ! $alive || microtime( true ) >= $deadline ) {
+										break;
+									}
+									usleep( 100000 );
+								}
+								foreach ( $alive as $pid ) {
+									posix_kill( $pid, SIGKILL );
 								}
 								while ( pcntl_waitpid( -1, $status ) > 0 ) {
 									continue;
@@ -873,6 +887,29 @@ class FeatureContext implements Context
 				}
 			}
 		}
+	}
+
+	/**
+	 * Every descendant process of $pid, parents before children.
+	 */
+	private static function descendants( $pid ) {
+		$tree = [];
+		foreach ( glob( "/proc/$pid/task/*/children" ) ?: [] as $file ) {
+			foreach ( preg_split( '/\s+/', trim( (string) @file_get_contents( $file ) ) ) as $child ) {
+				if ( '' !== $child ) {
+					$tree[] = (int) $child;
+					$tree   = array_merge( $tree, self::descendants( (int) $child ) );
+				}
+			}
+		}
+
+		return $tree;
+	}
+
+	private static function isAlive( $pid ) {
+		$stat = @file_get_contents( "/proc/$pid/stat" );
+
+		return false !== $stat && ! preg_match( '/\) Z /', $stat );
 	}
 
 	public static function restoreRealConfigOnShutdown() {
