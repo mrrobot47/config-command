@@ -578,9 +578,18 @@ class FeatureContext implements Context
 		// The config can hold secrets (cloudflare-api-key), hence 0600.
 		$meta = $state;
 		unset( $meta['content'] );
-		$fh = fopen( $tmp, 'x' );
-		$ok = $fh && false !== fwrite( $fh, json_encode( [ 'path' => self::realConfigPath(), 'state' => $meta, 'content_b64' => isset( $state['content'] ) ? base64_encode( $state['content'] ) : null ] ) ) && fclose( $fh );
+		$json = json_encode( [ 'path' => self::realConfigPath(), 'state' => $meta, 'content_b64' => isset( $state['content'] ) ? base64_encode( $state['content'] ) : null ] );
+		$fh   = fopen( $tmp, 'x' );
 		umask( $old );
+		// A short write (disk full) must not publish a truncated backup.
+		$ok = false;
+		if ( $fh ) {
+			$ok = false !== $json && strlen( $json ) === fwrite( $fh, $json );
+			$ok = fclose( $fh ) && $ok;
+		}
+		if ( ! $ok && file_exists( $tmp ) ) {
+			unlink( $tmp );
+		}
 		if ( ! $ok || ! chmod( $tmp, 0600 ) || ! rename( $tmp, self::REAL_CONFIG_BACKUP ) ) {
 			throw new Exception( 'Unable to write ' . self::REAL_CONFIG_BACKUP . '; refusing to run without a backup of the real config.' );
 		}
@@ -687,6 +696,10 @@ class FeatureContext implements Context
 
 	private function describeLastCommand() {
 		$result = $this->lastCommand();
+		// Without a temporary config the command read the real one, whose values can be credentials.
+		if ( null === $this->tempConfigPath ) {
+			return sprintf( "Command: %s\nExit code: %d\n(output omitted: the command used the real config)", $result->command, $result->return_code );
+		}
 
 		return sprintf(
 			"Command: %s\nExit code: %d\nSTDOUT:\n%s\nSTDERR:\n%s",
