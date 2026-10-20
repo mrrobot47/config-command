@@ -106,7 +106,7 @@ Feature: Config file location (EE_CONFIG_PATH) and bootstrap defaults
       en_US
       """
 
-  # CFG-5: quiet (config key or --quiet) never takes effect, because core picks the logger before reading the config.
+  # quiet (config key or --quiet) never takes effect, because core picks the logger before reading the config.
   # If that gets fixed, get must print its value in a way quiet doesn't swallow, or this scenario fails.
   Scenario: quiet in the config file does not hide the value config get prints
     Given a temporary ee config file with:
@@ -124,7 +124,7 @@ Feature: Config file location (EE_CONFIG_PATH) and bootstrap defaults
       en_US
       """
 
-  # CFG-4: set stores the string 'false' (truthy), which only stays harmless while quiet is ignored (CFG-5).
+  # set stores the string 'false' (truthy), which only stays harmless while quiet is ignored.
   Scenario: Setting quiet to false stores a string and keeps output visible
     Given a temporary ee config file with:
       """

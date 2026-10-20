@@ -234,7 +234,7 @@ Feature: ee config set
       | bh#key     |
       | @bh-key    |
 
-  # CFG-8 (fixed in v4.13.2), regression check: the runner logs argv at debug level to ee.log, so secrets passed to `config set` are persisted there.
+  # Fixed in v4.13.2 (EasyEngine/easyengine#1944), regression check: the runner logs argv at debug level to ee.log, so secrets passed to `config set` are persisted there.
   Scenario: Set does not copy the value into ee.log
     Given the environment variable 'BH_SECRET' is set to 'bh-config-command-secret-{RUN_ID}'
     And I remember the size of the file '{EE_LOG}'

@@ -229,7 +229,7 @@ Feature: ee config list
     Then the exit code should be 0
     And STDOUT should be JSON listing the entries of the YAML file '{CONFIG_PATH}'
 
-  # --quiet is ignored today (CFG-5). Table and text output go through the logger, so fixing quiet must not swallow them.
+  # --quiet is ignored today (core sets up the logger before reading the config). Table and text output go through the logger, so fixing quiet must not swallow them.
   Scenario: Human-readable formats still print with --quiet
     When I run 'bin/ee config list --quiet'
     Then the exit code should be 0
@@ -246,7 +246,7 @@ Feature: ee config list
       le-mail: admin@bh-config-command.test
       """
 
-  # CFG-8 (fixed in v4.13.2), regression check: --format=text prints through EE::log, which also writes every value (secrets included) to ee.log.
+  # Fixed in v4.13.2 (EasyEngine/config-command#14), regression check: --format=text prints through EE::log, which also writes every value (secrets included) to ee.log.
   Scenario: List --format=text does not copy values into ee.log
     Given a temporary ee config file with:
       """
