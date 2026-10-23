@@ -419,18 +419,6 @@ class FeatureContext implements Context
 				}
 			}
 		}
-
-		// Avoid invoking ee (and the live stack) when this suite left no sites behind.
-		if ( ! glob( EE_SITE_ROOT . '/' . self::SITE_PREFIX . '*' ) ) {
-			return;
-		}
-
-		$result = EE::launch( 'bin/ee site list --format=text', false, true );
-		foreach ( array_filter( array_map( 'trim', explode( "\n", $result->stdout ) ) ) as $site ) {
-			if ( 0 === strpos( $site, self::SITE_PREFIX ) ) {
-				exec( 'bin/ee site delete ' . escapeshellarg( $site ) . ' --yes' );
-			}
-		}
 	}
 
 	/*
